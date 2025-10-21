@@ -206,6 +206,9 @@ try
 		throw new Exception("There is no service available for version '$sVersion'", RestResult::UNSUPPORTED_VERSION);
 	}
 
+	// Whether the archive mode is active.
+	$bArchiveMode = utils::ReadParam('archive_mode', 0, false, utils::ENUM_SANITIZATION_FILTER_INTEGER) == 1;
+	utils::PushArchiveMode($bArchiveMode);
 
 	$sOperation = RestUtils::GetMandatoryParam($aJsonData, 'operation');
 	if ($sOperation == 'list_operations')

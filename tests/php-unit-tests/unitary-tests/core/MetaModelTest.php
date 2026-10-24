@@ -95,7 +95,79 @@ class MetaModelTest extends ItopDataTestCase
 			'foo->bar' => 'I am bar', // N°2889 - Placeholder with an arrow that is not an object
 		];
 
+		$oPlain = new class {
+			public $Reference = 'REF-1';
+			public int $Count = 3;
+			public bool $Flag = true;
+			public ?string $Nothing = null;
+			public array $List = ['a'];
+			private string $Secret = 'hidden';
+			protected string $Guarded = 'hidden';
+			public string $Uninitialized;
+
+			public function GetTotal()
+			{
+				return 12.5;
+			}
+
+			public function Repeat($sText, $iTimes)
+			{
+				return str_repeat($sText, $iTimes);
+			}
+
+			public function GetOptional($sPrefix = 'opt')
+			{
+				return $sPrefix.'-called';
+			}
+
+			protected function GetProtected()
+			{
+				return 'hidden';
+			}
+
+			public static function GetStatic()
+			{
+				return 'static';
+			}
+
+			public function __toString()
+			{
+				return 'stringified';
+			}
+		};
+		$oProvider = new class implements \iTemplatePlaceholderProvider {
+			public function GetForTemplate($sPlaceholderAttCode)
+			{
+				return $sPlaceholderAttCode === 'known' ? 'provided' : null;
+			}
+		};
+		$aParams['plain->object()'] = $oPlain;
+		$aParams['provider->object()'] = $oProvider;
+
 		return [
+			'Plain object: public property' => ['$plain->Reference$', $aParams, 'REF-1'],
+			'Plain object: public property (html format)' => ['<p>$plain-&gt;Reference$</p>', $aParams, '<p>REF-1</p>'],
+			'Plain object: public property url-encoded (html format)' => ['<a href="http://foo.bar/%24plain-&gt;Reference%24">Link</a>', $aParams, '<a href="http://foo.bar/REF-1">Link</a>'],
+			'Plain object: integer property' => ['$plain->Count$', $aParams, '3'],
+			'Plain object: boolean property' => ['$plain->Flag$', $aParams, '1'],
+			'Plain object: null property is left untouched' => ['$plain->Nothing$', $aParams, '$plain->Nothing$'],
+			'Plain object: array property is left untouched' => ['$plain->List$', $aParams, '$plain->List$'],
+			'Plain object: uninitialized property is left untouched' => ['$plain->Uninitialized$', $aParams, '$plain->Uninitialized$'],
+			'Plain object: private property is left untouched' => ['$plain->Secret$', $aParams, '$plain->Secret$'],
+			'Plain object: protected property is left untouched' => ['$plain->Guarded$', $aParams, '$plain->Guarded$'],
+			'Plain object: unknown member is left untouched' => ['$plain->Unknown$', $aParams, '$plain->Unknown$'],
+			'Plain object: public method' => ['$plain->GetTotal()$', $aParams, '12.5'],
+			'Plain object: public method with optional parameter' => ['$plain->GetOptional()$', $aParams, 'opt-called'],
+			'Plain object: method with required parameters is not called' => ['$plain->Repeat()$', $aParams, '$plain->Repeat()$'],
+			'Plain object: method with arguments in placeholder is not called' => ['$plain->Repeat(a)$', $aParams, '$plain->Repeat(a)$'],
+			'Plain object: protected method is left untouched' => ['$plain->GetProtected()$', $aParams, '$plain->GetProtected()$'],
+			'Plain object: static method is left untouched' => ['$plain->GetStatic()$', $aParams, '$plain->GetStatic()$'],
+			'Plain object: magic method is left untouched' => ['$plain->__toString()$', $aParams, '$plain->__toString()$'],
+			'Plain object: property used as method is left untouched' => ['$plain->Reference()$', $aParams, '$plain->Reference()$'],
+			'Plain object: method used as property is left untouched' => ['$plain->GetTotal$', $aParams, '$plain->GetTotal$'],
+			'Plain object: several placeholders' => ['$plain->Reference$ / $plain->GetTotal()$', $aParams, 'REF-1 / 12.5'],
+			'Template provider: known placeholder' => ['$provider->known$', $aParams, 'provided'],
+			'Template provider: unknown placeholder is left untouched' => ['$provider->other$', $aParams, '$provider->other$'],
 			'Simple placeholder' => [
 				'Result: $simple$',
 				$aParams,

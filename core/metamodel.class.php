@@ -111,6 +111,22 @@ define('OPT_ATT_SLAVE', 32);
 define('MYSQL_ENGINE', 'innodb');
 
 /**
+ * Implemented by regular (non DBObject) objects that expose their own placeholders to {@see \MetaModel::ApplyParams()}.
+ *
+ * @api
+ * @since 3.3.0
+ */
+interface iTemplatePlaceholderProvider
+{
+	/**
+	 * @param string $sPlaceholderAttCode Whatever follows the arrow in the placeholder, e.g. "reference" for $foo->reference$.
+	 *
+	 * @return string|null The replacement, or null to leave the placeholder untouched.
+	 */
+	public function GetForTemplate($sPlaceholderAttCode);
+}
+
+/**
  * The objects definitions as well as their mapping to the database
  *
  * @api
@@ -6701,6 +6717,9 @@ abstract class MetaModel
 	 *   * foo->bar : Another static placeholder
 	 *   * foo->object() : Will be developed into a set of placeholders depending on the attribute of the given \DBObject and their corresponding transformation methods {@see \AttributeDefinition::GetForTemplate()}
 	 *                     Example: foo->hyperlink(), foo->name, foo->html(name), foo->head(log), foo->head_html(log), ...
+	 *   * foo->object() : Can also be a regular object. If it implements \iTemplatePlaceholderProvider, its GetForTemplate() is used.
+	 *                     Otherwise public properties (foo->Reference) and public methods without required parameters (foo->GetTotal())
+	 *                     are exposed. Magic and static methods are never called.
 	 *
 	 * @link https://www.itophub.io/wiki/page?id=latest:admin:placeholders
 	 * @return string
@@ -6724,24 +6743,34 @@ abstract class MetaModel
 				if ($iPos !== false) {
 					// Expand the parameters for the object
 					$sName = substr($sSearch, 0, $iPos);
+					// Skip objects that are not referenced at all.
+					if (!str_contains($sInput, $sName.'-')) {
+						continue;
+					}
+					$sQuotedName = preg_quote($sName, '/');
+					$bIsTemplateSource = ($replace instanceof DBObject) || ($replace instanceof iTemplatePlaceholderProvider);
 					// Note: Capturing
 					// 1 - The delimiter
 					// 2 - The arrow
 					// 3 - The attribute code
 					$aRegExps = [
-						'/(\\$)'.$sName.'-(>|&gt;)([^\\$]+)\\$/', // Support both syntaxes: $this->xxx$ or $this-&gt;xxx$ for HTML compatibility
-						'/(%24)'.$sName.'-(>|&gt;)([^%24]+)%24/', // Support for urlencoded in HTML attributes (%20this-&gt;xxx%20)
+						'/(\\$)'.$sQuotedName.'-(>|&gt;)([^\\$]+)\\$/', // Support both syntaxes: $this->xxx$ or $this-&gt;xxx$ for HTML compatibility
+						'/(%24)'.$sQuotedName.'-(>|&gt;)([^%24]+)%24/', // Support for urlencoded in HTML attributes (%20this-&gt;xxx%20)
 					];
 					foreach ($aRegExps as $sRegExp) {
 						if (preg_match_all($sRegExp, $sInput, $aMatches)) {
 							foreach ($aMatches[3] as $idx => $sPlaceholderAttCode) {
 								try {
-									$sReplacement = $replace->GetForTemplate($sPlaceholderAttCode);
+									if ($bIsTemplateSource) {
+										$sReplacement = $replace->GetForTemplate($sPlaceholderAttCode);
+									} else {
+										$sReplacement = static::GetPlainObjectPlaceholderValue($replace, $sPlaceholderAttCode);
+									}
 									if ($sReplacement !== null) {
 										$aReplacements[] = $sReplacement;
 										$aSearches[] = $aMatches[1][$idx].$sName.'-'.$aMatches[2][$idx].$sPlaceholderAttCode.$aMatches[1][$idx];
 									}
-								} catch (Exception $e) {
+								} catch (Throwable $e) {
 									$aContext = [
 										'placeholder'   => $sPlaceholderAttCode,
 										'replace class' => get_class($replace),
@@ -6762,12 +6791,14 @@ abstract class MetaModel
 					continue; // Ignore this non-scalar value
 				}
 			} else {
+				$sQuotedSearch = preg_quote($sSearch, '/');
+				$sQuotedSearchHtml = preg_quote(utils::EscapeHtml($sSearch), '/');
 				$aRegExps = [
-					'/(\$)'.$sSearch.'\$/',   // Regular placeholders (eg. $APP_URL$) or placeholders with an arrow in plain text (eg. $foo->bar$)
-					'/(%24)'.$sSearch.'%24/', // Regular placeholders url-encoded in HTML attributes (eg. %24APP_URL%24)
+					'/(\$)'.$sQuotedSearch.'\$/',   // Regular placeholders (eg. $APP_URL$) or placeholders with an arrow in plain text (eg. $foo->bar$)
+					'/(%24)'.$sQuotedSearch.'%24/', // Regular placeholders url-encoded in HTML attributes (eg. %24APP_URL%24)
 
-					'/(\$)'.utils::EscapeHtml($sSearch).'\$/',      // Placeholders with an arrow in HTML (eg. $foo-&gt;bar$)
-					'/(%24)'.utils::EscapeHtml($sSearch).'%24/',    // Placeholders with an arrow url-encoded in HTML attributes (eg. %24-&gt;bar%24)
+					'/(\$)'.$sQuotedSearchHtml.'\$/',      // Placeholders with an arrow in HTML (eg. $foo-&gt;bar$)
+					'/(%24)'.$sQuotedSearchHtml.'%24/',    // Placeholders with an arrow url-encoded in HTML attributes (eg. %24-&gt;bar%24)
 				];
 				foreach ($aRegExps as $sRegExp) {
 					if (preg_match_all($sRegExp, $sInput, $aMatches)) {
@@ -6785,7 +6816,7 @@ abstract class MetaModel
 									'Invalid placeholder in notification, no replacement will occur !',
 									LogChannels::NOTIFICATIONS,
 									[
-										'placeholder' => $sPlaceholderAttCode,
+										'placeholder' => $sSearch,
 										'replace'     => $replace,
 									]
 								);
@@ -6797,6 +6828,76 @@ abstract class MetaModel
 		}
 
 		return str_replace($aSearches, $aReplacements, $sInput);
+	}
+
+	/**
+	 * Resolve a placeholder against a regular (non DBObject) object.
+	 *
+	 * Supported forms: "Foo" (public property) and "Foo()" (public method without required parameters).
+	 * Magic and static methods are never called. Reflection lookups are cached per class and token.
+	 *
+	 * @param object $oObject
+	 * @param string $sToken Whatever follows the arrow in the placeholder.
+	 *
+	 * @return string|null The replacement, or null when the placeholder cannot be resolved (it is then left untouched).
+	 */
+	protected static function GetPlainObjectPlaceholderValue($oObject, $sToken)
+	{
+		static $aMemberCache = [];
+
+		$sCacheKey = get_class($oObject).'::'.$sToken;
+		if (!array_key_exists($sCacheKey, $aMemberCache)) {
+			$aMemberCache[$sCacheKey] = false;
+			if (preg_match('/^([A-Za-z_][A-Za-z0-9_]*)(\(\))?$/', $sToken, $aMatches) && !str_starts_with($aMatches[1], '__')) {
+				$sMember = $aMatches[1];
+				$bIsMethod = isset($aMatches[2]);
+				if ($bIsMethod && method_exists($oObject, $sMember)) {
+					$oMethod = new ReflectionMethod($oObject, $sMember);
+					if ($oMethod->isPublic() && !$oMethod->isStatic() && ($oMethod->getNumberOfRequiredParameters() === 0)) {
+						$aMemberCache[$sCacheKey] = $oMethod;
+					}
+				} elseif (!$bIsMethod && property_exists($oObject, $sMember)) {
+					$oProperty = new ReflectionProperty($oObject, $sMember);
+					if ($oProperty->isPublic() && !$oProperty->isStatic()) {
+						$aMemberCache[$sCacheKey] = $oProperty;
+					}
+				}
+			}
+		}
+
+		$oMember = $aMemberCache[$sCacheKey];
+		if ($oMember === false) {
+			return null;
+		}
+
+		if ($oMember instanceof ReflectionMethod) {
+			$value = $oMember->invoke($oObject);
+		} elseif ($oMember->isInitialized($oObject)) {
+			$value = $oMember->getValue($oObject);
+		} else {
+			return null;
+		}
+
+		if ($value === null) {
+			return null;
+		}
+		if (is_bool($value)) {
+			return $value ? '1' : '';
+		}
+		if (is_scalar($value) || ($value instanceof Stringable)) {
+			return (string) $value;
+		}
+
+		IssueLog::Debug(
+			'Placeholder does not resolve to a scalar, no replacement will occur!',
+			LogChannels::NOTIFICATIONS,
+			[
+				'placeholder'   => $sToken,
+				'replace class' => get_class($oObject),
+			]
+		);
+
+		return null;
 	}
 
 	/**
